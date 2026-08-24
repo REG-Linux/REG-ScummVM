@@ -1,0 +1,250 @@
+name: Build REG-ScummVM self-hosted
+
+on:
+  workflow_dispatch:
+
+concurrency:
+    group: ${{ github.repository }}-${{ github.workflow }}
+    cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US:en
+  LC_ALL: en_US.UTF-8
+  FORCE_UNSAFE_CONFIGURE: 1
+
+jobs:
+  build:
+    name: Build REG-ScummVM
+    runs-on: self-hosted
+    timeout-minutes: 4320
+    strategy:
+      matrix:
+        # One build per arch, not per board: every board picks its prebuilt by
+        # REGLINUX_SCUMMVM_ARCH (see reglinux-scummvm.mk), so the target below
+        # is just a representative board for that arch.
+        #
+        # The labels are not CPU names as they are for MAME - they are whatever
+        # reglinux-scummvm.mk assigns, which happen to be board names. Where the
+        # label and the target differ (sun50i built on h616, s905gen3 on rk3568,
+        # rk3588 on sm8250) the label names one board of the group while a
+        # different one is the convenient build target.
+        #
+        # 32-bit boards are present, unlike MAME: nothing gates this prebuilt on
+        # BR2_ARCH_IS_64, so they all look for a tarball.
+        arch: [jz4770, bcm2835, bcm2836, s812, odroidxu4, rk3288, rk3326, sun50i, odroidc5, s905gen3, bcm2711, rk3399, s922x, bcm2712, rk3588, sm8550, asahi, jh7110, th1520, k1, x86_64, x86_64_v3]
+        include:
+          - target: jz4770
+            arch: jz4770
+          - target: bcm2835
+            arch: bcm2835
+          # also covers cha, h3, mini, rk3128
+          - target: bcm2836
+            arch: bcm2836
+          # also covers de10nano
+          - target: s812
+            arch: s812
+          - target: odroidxu4
+            arch: odroidxu4
+          - target: rk3288
+            arch: rk3288
+          # also covers s9gen4
+          - target: rk3326
+            arch: rk3326
+          # also covers bcm2837, h700, rk3328, s905, s905gen2, sun50i
+          - target: h616
+            arch: sun50i
+          # odroidc5 is matched before cortex_a55 in reglinux-scummvm.mk, so it
+          # gets its own tarball rather than sharing s905gen3's
+          - target: odroidc5
+            arch: odroidc5
+          # also covers s905gen3, t527
+          - target: rk3568
+            arch: s905gen3
+          - target: bcm2711
+            arch: bcm2711
+          # also covers rk3576, rk3576-bsp, rk3576-mainline
+          - target: rk3399
+            arch: rk3399
+          # also covers a3gen2, sm6115, and cortex_a75_a55 (sdm845) via the
+          # ODIN HACK branch
+          - target: s922x
+            arch: s922x
+          - target: bcm2712
+            arch: bcm2712
+          # also covers mt8395, qcs6490, rk3588
+          - target: sm8250
+            arch: rk3588
+          - target: sm8550
+            arch: sm8550
+          - target: asahi
+            arch: asahi
+          - target: jh7110
+            arch: jh7110
+          - target: th1520
+            arch: th1520
+          # k1/k3 build with RVV, so they cannot share the jh7110 tarball
+          - target: k1
+            arch: k1
+          - target: x86_64
+            arch: x86_64
+          - target: x86_64_v3
+            arch: x86_64_v3
+      fail-fast: false
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Clone repository
+        id: clone_step
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: REG-Linux/REG-WIP
+          token: ${{ secrets.REG_TOKEN }}
+          submodules: true
+
+      - name: Compile ${{ matrix.target }}
+        id: compile_step
+        env:
+          GH_TOKEN: ${{ secrets.REG_TOKEN }}
+        run: |
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+          git config --local user.password ${{ github.token }}
+
+          # Merge buildroot patches
+          CUSTOM_DIR=${{ github.workspace }}/custom BUILDROOT_DIR=${{ github.workspace }}/buildroot ${{ github.workspace }}/scripts/buildroot/mergeToBR.sh
+
+          # Version
+          scummvmversion="$(sed -nE 's/^SCUMMVM_VERSION[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$/\1/p' package/engines/scummvm/scummvm.mk)"
+          lrscummvmversion="$(sed -nE 's/^LIBRETRO_SCUMMVM_VERSION[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$/\1/p' package/engines/libretro/libretro-scummvm/libretro-scummvm.mk)"
+          echo "scummvmversion=${scummvmversion}"
+          echo "lrscummvmversion=${lrscummvmversion}"
+          { [ -z "$scummvmversion" ] || [ -z "$lrscummvmversion" ] || [ "$scummvmversion" != "$lrscummvmversion" ]; } && { echo "Version not detected or mismatched."; exit 1; }
+          echo "scummvmversion=${scummvmversion}" >> "$GITHUB_OUTPUT"
+
+          # Check if already released and avoid compiling again
+          if [ "$(curl -o /dev/null -s -Iw '%{http_code}' -L "https://github.com/${{ github.repository }}/releases/download/${scummvmversion}/reglinux-scummvm-${scummvmversion}-${{ matrix.arch }}.tar.xz")" -eq 200 ]; then
+            echo "Already released, skipping build."
+          else
+            echo "Not yet released, proceeding with build"
+            df -BG --output=avail ./
+
+            # fix for error "failed to set up container networking"
+            sed -i 's| --rm | --rm --network host |' Makefile
+
+            # Enable the flag to build ScummVM from source. One switch does both
+            # packages: Config.in.engines selects SCUMMVM and LIBRETRO_SCUMMVM
+            # when it is on, and REGLINUX_SCUMMVM - the prebuilt this workflow
+            # produces - when it is off.
+            sed -i 's/#BR2_PACKAGE_SCUMMVM_BUILD_FROM_SOURCE=y/BR2_PACKAGE_SCUMMVM_BUILD_FROM_SOURCE=y/' configs/reglinux-board.common
+
+            # Disable CCACHE
+            sed -i 's/BR2_CCACHE=y/BR2_CCACHE=n/' configs/reglinux-board.common
+
+            # Keep Buildroot's downloads outside the workspace. actions/checkout
+            # runs with clean: true, so a workspace dl/ is wiped and re-download
+            # the same tarballs. This also fixes an outright failure: every container
+            # mounts -v $(DL_DIR):/build/buildroot/dl, and docker creates a missing
+            # bind-mount source as root:root, which the build - running as
+            # -u $(id -u):$(id -g) - then cannot write into.
+            # Export it rather than passing DL_DIR=... on the make command line:
+            # DL_DIR is not in the Makefile's WRAPPER_VARS, so a command-line
+            # assignment would be forwarded into the container through MAKEFLAGS
+            # and point Buildroot at a host path that does not exist there.
+            export DL_DIR="${HOME}/reglinux-dl"
+            mkdir -p "$DL_DIR"
+
+            rm -rf output/
+            make PKG=scummvm ${{ matrix.target }}-pkg DEBUG_BUILD=n CCACHE_DISABLE=1
+            make PKG=libretro-scummvm ${{ matrix.target }}-pkg DEBUG_BUILD=n CCACHE_DISABLE=1
+
+            # Create package. Harvest from each package's own .files-list.txt
+            # rather than naming paths: that is the list Buildroot recorded when
+            # installing to target, so it picks up the engine plugins under
+            # usr/lib/scummvm and the datafiles under usr/share/scummvm without
+            # this workflow having to know they exist.
+            cd "${{ github.workspace }}/output/${{ matrix.target }}" || exit 1
+            if [ -d "per-package" ]; then
+              cat build/scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+per-package\/scummvm\/target\/+g' >scummvm-target-files.txt
+              cat build/libretro-scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+per-package\/libretro-scummvm\/target\/+g' >>scummvm-target-files.txt
+              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-scummvm-${scummvmversion}-${{ matrix.arch }}.tar.xz" --transform='s|.*target/|target/|' --verbatim-files-from -T scummvm-target-files.txt || :
+            else
+              cat build/scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+target\/+g' >scummvm-target-files.txt
+              cat build/libretro-scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+target\/+g' >>scummvm-target-files.txt
+              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-scummvm-${scummvmversion}-${{ matrix.arch }}.tar.xz" --verbatim-files-from -T scummvm-target-files.txt || :
+            fi
+            echo "dorelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Artifacts
+        if: ${{ steps.compile_step.outputs.dorelease == 'true' && ! cancelled() }}
+        id: upload_artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: reglinux-scummvm-${{ steps.compile_step.outputs.scummvmversion }}-${{ matrix.arch }}
+          compression-level: 0
+          path: reglinux-scummvm-${{ steps.compile_step.outputs.scummvmversion }}-*
+
+      - name: Upload full-build.log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: full-build-log-${{ matrix.target }}
+          path: ${{ github.workspace }}/output/${{ matrix.target }}/build/full-build.log
+
+  create_release:
+    name: Create release
+    runs-on: self-hosted
+    needs: build
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Clean stale artifacts from previous runs
+        run: rm -rf artifacts && mkdir -p artifacts
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: reglinux-scummvm-*
+          path: artifacts
+          merge-multiple: true
+
+      # A matrix job cannot aggregate a "did anything build?" flag: every leg
+      # writes the same job output and the last one to finish wins, so a leg
+      # that skipped the build would suppress the release. The artifacts are
+      # the aggregate - only legs that built something upload one - and the
+      # version is already in their file names.
+      - name: Decide whether there is anything to release
+        id: rel
+        run: |
+          shopt -s nullglob
+          files=(artifacts/reglinux-scummvm-*.tar.xz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No new tarballs were built; nothing to release."
+            exit 0
+          fi
+          scummvmversion="$(basename "${files[0]}" | sed -nE 's/^reglinux-scummvm-(v[0-9]+\.[0-9]+\.[0-9]+)-.*\.tar\.xz$/\1/p')"
+          if [ -z "$scummvmversion" ]; then
+            echo "Could not parse ScummVM version from ${files[0]}"
+            exit 1
+          fi
+          echo "Releasing ${#files[@]} tarball(s) as ${scummvmversion}"
+          echo "scummvmversion=${scummvmversion}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: ${{ steps.rel.outputs.scummvmversion != '' }}
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          files: artifacts/reglinux-scummvm-${{ steps.rel.outputs.scummvmversion }}-*
+          tag_name: ${{ steps.rel.outputs.scummvmversion }}
+          prerelease: false
+          generate_release_notes: true
+          name: ScummVM binaries ${{ steps.rel.outputs.scummvmversion }}
