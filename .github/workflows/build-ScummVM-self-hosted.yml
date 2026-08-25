@@ -24,76 +24,71 @@ jobs:
     timeout-minutes: 4320
     strategy:
       matrix:
-        # One build per arch, not per board: every board picks its prebuilt by
-        # REGLINUX_SCUMMVM_ARCH (see reglinux-scummvm.mk), so the target below
-        # is just a representative board for that arch.
+        # One build per CPU, not per board: reglinux-scummvm.mk picks the
+        # prebuilt by REGLINUX_SCUMMVM_CPU, so the target below is just a
+        # convenient board to build that CPU on, and every other board sharing
+        # the CPU takes the same tarball. Keep this list in step with
+        # scripts/linux/prebuild/prebuild-scummvms.sh in REG-WIP and with the
+        # CPU table in reglinux-scummvm.mk.
         #
-        # The labels are not CPU names as they are for MAME - they are whatever
-        # reglinux-scummvm.mk assigns, which happen to be board names. Where the
-        # label and the target differ (sun50i built on h616, s905gen3 on rk3568,
-        # rk3588 on sm8250) the label names one board of the group while a
-        # different one is the convenient build target.
-        #
-        # 32-bit boards are present, unlike MAME: nothing gates this prebuilt on
+        # 32-bit CPUs are present, unlike MAME: nothing gates this prebuilt on
         # BR2_ARCH_IS_64, so they all look for a tarball.
-        arch: [jz4770, bcm2835, bcm2836, s812, odroidxu4, rk3288, rk3326, sun50i, odroidc5, s905gen3, bcm2711, rk3399, s922x, bcm2712, rk3588, sm8550, asahi, jh7110, th1520, k1, x86_64, x86_64_v3]
+        cpu: [jz4770, arm1176jzf_s, cortex_a7, cortex_a9, cortex_a15_a7, cortex_a17, cortex_a35, cortex_a53, cortex_a55, cortex_a57, cortex_a72, cortex_a72_a53, cortex_a73_a53, cortex_a75_a55, cortex_a76, cortex_a76_a55, cortex_x3, saphira, riscv, riscv_rvv, x86_64, x86_64_v3]
         include:
           - target: jz4770
-            arch: jz4770
+            cpu: jz4770
           - target: bcm2835
-            arch: bcm2835
+            cpu: arm1176jzf_s
           # also covers cha, h3, mini, rk3128
           - target: bcm2836
-            arch: bcm2836
+            cpu: cortex_a7
           # also covers de10nano
           - target: s812
-            arch: s812
+            cpu: cortex_a9
           - target: odroidxu4
-            arch: odroidxu4
+            cpu: cortex_a15_a7
           - target: rk3288
-            arch: rk3288
+            cpu: cortex_a17
           # also covers s9gen4
           - target: rk3326
-            arch: rk3326
+            cpu: cortex_a35
           # also covers bcm2837, h700, rk3328, s905, s905gen2, sun50i
           - target: h616
-            arch: sun50i
-          # odroidc5 is matched before cortex_a55 in reglinux-scummvm.mk, so it
-          # gets its own tarball rather than sharing s905gen3's
-          - target: odroidc5
-            arch: odroidc5
-          # also covers s905gen3, t527
+            cpu: cortex_a53
+          # also covers odroidc5, s905gen3, t527
           - target: rk3568
-            arch: s905gen3
+            cpu: cortex_a55
+          - target: l4t
+            cpu: cortex_a57
           - target: bcm2711
-            arch: bcm2711
+            cpu: cortex_a72
           # also covers rk3576, rk3576-bsp, rk3576-mainline
           - target: rk3399
-            arch: rk3399
-          # also covers a3gen2, sm6115, and cortex_a75_a55 (sdm845) via the
-          # ODIN HACK branch
+            cpu: cortex_a72_a53
+          # also covers a3gen2, sm6115
           - target: s922x
-            arch: s922x
+            cpu: cortex_a73_a53
+          - target: sdm845
+            cpu: cortex_a75_a55
           - target: bcm2712
-            arch: bcm2712
+            cpu: cortex_a76
           # also covers mt8395, qcs6490, rk3588
           - target: sm8250
-            arch: rk3588
+            cpu: cortex_a76_a55
           - target: sm8550
-            arch: sm8550
+            cpu: cortex_x3
           - target: asahi
-            arch: asahi
+            cpu: saphira
+          # rv64gc; also covers th1520
           - target: jh7110
-            arch: jh7110
-          - target: th1520
-            arch: th1520
+            cpu: riscv
           # k1/k3 build with RVV, so they cannot share the jh7110 tarball
           - target: k1
-            arch: k1
+            cpu: riscv_rvv
           - target: x86_64
-            arch: x86_64
+            cpu: x86_64
           - target: x86_64_v3
-            arch: x86_64_v3
+            cpu: x86_64_v3
       fail-fast: false
     steps:
       - name: Login to GHCR
@@ -132,7 +127,7 @@ jobs:
           echo "scummvmversion=${scummvmversion}" >> "$GITHUB_OUTPUT"
 
           # Check if already released and avoid compiling again
-          if [ "$(curl -o /dev/null -s -Iw '%{http_code}' -L "https://github.com/${{ github.repository }}/releases/download/${scummvmversion}/reglinux-scummvm-${scummvmversion}-${{ matrix.arch }}.tar.xz")" -eq 200 ]; then
+          if [ "$(curl -o /dev/null -s -Iw '%{http_code}' -L "https://github.com/${{ github.repository }}/releases/download/${scummvmversion}/reglinux-scummvm-${scummvmversion}-${{ matrix.cpu }}.tar.xz")" -eq 200 ]; then
             echo "Already released, skipping build."
           else
             echo "Not yet released, proceeding with build"
@@ -176,11 +171,11 @@ jobs:
             if [ -d "per-package" ]; then
               cat build/scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+per-package\/scummvm\/target\/+g' >scummvm-target-files.txt
               cat build/libretro-scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+per-package\/libretro-scummvm\/target\/+g' >>scummvm-target-files.txt
-              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-scummvm-${scummvmversion}-${{ matrix.arch }}.tar.xz" --transform='s|.*target/|target/|' --verbatim-files-from -T scummvm-target-files.txt || :
+              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-scummvm-${scummvmversion}-${{ matrix.cpu }}.tar.xz" --transform='s|.*target/|target/|' --verbatim-files-from -T scummvm-target-files.txt || :
             else
               cat build/scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+target\/+g' >scummvm-target-files.txt
               cat build/libretro-scummvm-*/.files-list.txt | cut -d ',' -f 2 | sed -e 's+\.\/+target\/+g' >>scummvm-target-files.txt
-              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-scummvm-${scummvmversion}-${{ matrix.arch }}.tar.xz" --verbatim-files-from -T scummvm-target-files.txt || :
+              XZ_OPT=-9 tar -cJf "${{ github.workspace }}/reglinux-scummvm-${scummvmversion}-${{ matrix.cpu }}.tar.xz" --verbatim-files-from -T scummvm-target-files.txt || :
             fi
             echo "dorelease=true" >> "$GITHUB_OUTPUT"
           fi
@@ -190,7 +185,7 @@ jobs:
         id: upload_artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: reglinux-scummvm-${{ steps.compile_step.outputs.scummvmversion }}-${{ matrix.arch }}
+          name: reglinux-scummvm-${{ steps.compile_step.outputs.scummvmversion }}-${{ matrix.cpu }}
           compression-level: 0
           path: reglinux-scummvm-${{ steps.compile_step.outputs.scummvmversion }}-*
 
